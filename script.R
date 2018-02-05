@@ -1,15 +1,13 @@
-source(input.R)
-source(trend.R)
-source(level.R)
-
 ############### Preprocessing for temporal pattern mining -----------------------------
 library(Kendall)
 library(jmotif)
 library(changepoint)
 
-## Reading a partition and converting it into the table format for pattern mining (using SAX, but it is easily to adapt)
+## Reading a partition and converting it into the table format for pattern mining
 ## It returns the table, the representations for each event type, the start-end time limits for the job and the cache updated
-convert_partition__sax_mining <- function(index, cache){
+
+## sax-based representation
+convert_partition_sax_mining <- function(index, cache){
   f = Sys.glob(paste0("/local/partitions/partition_",index,"/*.csv")) # get .csv files from partition 
   no_f <- length(f) 
   P <- list() # set of event types
@@ -106,23 +104,236 @@ convert_partition__sax_mining <- function(index, cache){
   return(list(table = input_table, start = start, end = end, representations = representation, cache = cache))
 }
 
-# Writing partition tables to files
+## level-based representation
+convert_partition_level_mining <- function(index, cache){
+  f = Sys.glob(paste0("/local/partitions/partition_",index,"/*.csv")) # get .csv files from partition 
+  no_f <- length(f) 
+  P <- list() # set of event types
+  for(i in 1:no_f){ # build partition reading files
+    #i = 1
+    name = tools::file_path_sans_ext(f[[i]])
+    name <- basename(name)
+    name <- tail(strsplit(name,paste0("part_",index,"_"))[[1]],1)
+    print(paste0("Reading: ", name))
+    P[[name]] = fread(f[i], 
+                      sep = ",",
+                      select = c("nodeNumber","jobId", "taskId", "attemptID", "value", "timestamp"),
+                      integer64="numeric")
+    if(name=="HadoopDataActivity"){ # converting Hadoop Data Activity into positive and negative values
+      p <- P[[name]]
+      p <- list("positive" = p[p$value >= 0], "negative" = p[p$value < 0])
+      P[[name]] <- NULL
+      if(nrow(p$positive) > 0){
+        P[[length(P)+1]] <- p$positive
+        names(P)[[length(P)]] <- "Hadoop_positive"
+      }
+      if(nrow(p$negative) > 0){
+        P[[length(P)+1]] <- p$negative
+        names(P)[[length(P)]] <- "Hadoop_negative"
+      }
+    }
+  }
+  # adjusting timestamps and getting time limits relative to the job
+  result <- time_adjust_partition(P)
+  P_adj <- time_adjust_partition(P)$events
+  start <- result$start
+  end <- result$end  
+  input_table <- list()
+  # representation <- list()
+  # k <- 1
+  for(i in 1:length(P_adj)){ # building the table for pattern mining
+    name <- names(P_adj)[[i]]
+    ganglia_name <- paste0(name,".csv")
+    cache_name <- paste0(name,":",P_adj[[i]]$nodeNumber[1])
+    input_table[[i]] <- list()
+    #representation[[k]] <- list()
+    print(paste0("Converting: ",name))
+    if(name== "ReducePeriod" |
+       name== "Hadoop_positive" | 
+       name == "Hadoop_negative" |
+       name == "PullPeriod" |
+       name == "MapPeriod"){ # segmentation on continuous Hadoop events
+      value <- P_adj[[i]]$value
+      time <- P_adj[[i]]$timestamp
+      #intervals <- time_series_to_intervals(value, time, "level",list(3,0), name)$intervals
+      # if(length(value)==1)
+      #   n_paa = 1
+      # else
+      #   n_paa <- as.integer(length(value)/log2(length(value)))
+      if(length(value)==1){
+        intervals <- list()
+        intervals$start <- time
+        intervals$end <- time
+        intervals$symbol <- paste0(name,":",value)
+      }
+      else{
+        result <- time_series_to_intervals(value, time, "level",list(3,0), name)
+        intervals <- result$intervals
+      }
+      #representation[[k]] <- result$representation
+      #k <- k+1
+    }
+    else
+      if(match(ganglia_name, files)>=17){ # check if ganglia event is already present in the cache otherwise add to it
+        if(!is.null(cache[[cache_name]])){ # the "key" is "type:nodeNumber"
+          intervals <- cache[[cache_name]]$intervals
+          #representation[[k]] <- cache[[cache_name]]$representation
+          #k <- k+1
+        }
+        else{
+          value <- P_adj[[i]]$value
+          time <- P_adj[[i]]$timestamp
+          #intervals <- time_series_to_intervals(value, time, "level",list(3,0), name)$intervals
+          #n_paa <- as.integer(length(value)/log2(length(value)))
+          result <- time_series_to_intervals(value, time, "level",list(3,0), name)
+          intervals <- result$intervals
+          #representation[[k]] <- result$representation
+          # updating the cache
+          cache[[cache_name]] <- list()
+          cache[[cache_name]]$intervals <- intervals
+          #cache[[cache_name]]$representation <- result$representation
+          #k <- k+1
+        }
+      }
+    else{
+      s <- P_adj[[i]]
+      intervals <- list()
+      intervals$start <- s$timestamp
+      intervals$end <- s$timestamp
+      l <- length(s$timestamp)
+      intervals$symbol <- rep(name, l)
+    }
+    input_table[[i]] <- intervals
+  }
+  input_table  <- rbindlist(input_table)
+  setorder(input_table, start, end, symbol)
+  return(list(table = input_table, start = start, end = end, representations = representation, cache = cache))
+}
+
+## trend-based representation
+convert_partition_trend_mining <- function(index, cache){
+  f = Sys.glob(paste0("/local/partitions/partition_",index,"/*.csv")) # get .csv files from partition 
+  no_f <- length(f) 
+  P <- list() # set of event types
+  for(i in 1:no_f){ # build partition reading files
+    #i = 1
+    name = tools::file_path_sans_ext(f[[i]])
+    name <- basename(name)
+    name <- tail(strsplit(name,paste0("part_",index,"_"))[[1]],1)
+    print(paste0("Reading: ", name))
+    P[[name]] = fread(f[i], 
+                      sep = ",",
+                      select = c("nodeNumber","jobId", "taskId", "attemptID", "value", "timestamp"),
+                      integer64="numeric")
+    if(name=="HadoopDataActivity"){ # converting Hadoop Data Activity into positive and negative values
+      p <- P[[name]]
+      p <- list("positive" = p[p$value >= 0], "negative" = p[p$value < 0])
+      P[[name]] <- NULL
+      if(nrow(p$positive) > 0){
+        P[[length(P)+1]] <- p$positive
+        names(P)[[length(P)]] <- "Hadoop_positive"
+      }
+      if(nrow(p$negative) > 0){
+        P[[length(P)+1]] <- p$negative
+        names(P)[[length(P)]] <- "Hadoop_negative"
+      }
+    }
+  }
+  # adjusting timestamps and getting time limits relative to the job
+  result <- time_adjust_partition(P)
+  P_adj <- time_adjust_partition(P)$events
+  start <- result$start
+  end <- result$end  
+  input_table <- list()
+  representation <- list()
+  # k <- 1
+  for(i in 1:length(P_adj)){ # building the table for pattern mining
+    name <- names(P_adj)[[i]]
+    ganglia_name <- paste0(name,".csv")
+    cache_name <- paste0(name,":",P_adj[[i]]$nodeNumber[1])
+    input_table[[i]] <- list()
+    #representation[[k]] <- list()
+    print(paste0("Converting: ",name))
+    if(name== "ReducePeriod" |
+       name== "Hadoop_positive" | 
+       name == "Hadoop_negative" |
+       name == "PullPeriod" |
+       name == "MapPeriod"){ # segmentation on continuous Hadoop events
+      value <- P_adj[[i]]$value
+      time <- P_adj[[i]]$timestamp
+      #intervals <- time_series_to_intervals(value, time, "level",list(3,0), name)$intervals
+      # if(length(value)==1)
+      #   n_paa = 1
+      # else
+      #   n_paa <- as.integer(length(value)/log2(length(value)))
+      if(length(value)==1){
+        intervals <- list()
+        intervals$start <- time
+        intervals$end <- time
+        intervals$symbol <- paste0(name,":",value)
+      }
+      else{
+        result <- time_series_to_intervals(value, time, "trend",list(50,50,0.01), name)
+        intervals <- result$intervals
+        #representation[[k]] <- result$representation
+        #k <- k+1
+      }
+    }
+    else
+      if(match(ganglia_name, files)>=17){ # check if ganglia event is already present in the cache otherwise add to it
+        if(!is.null(cache[[cache_name]])){ # the "key" is "type:nodeNumber"
+          intervals <- cache[[cache_name]]$intervals
+          #representation[[k]] <- cache[[cache_name]]$representation
+          #k <- k+1
+        }
+        else{
+          value <- P_adj[[i]]$value
+          time <- P_adj[[i]]$timestamp
+          #intervals <- time_series_to_intervals(value, time, "level",list(3,0), name)$intervals
+          #n_paa <- as.integer(length(value)/log2(length(value)))
+          result <- time_series_to_intervals(value, time, "trend",list(50,50,0.01), name)
+          intervals <- result$intervals
+          #representation[[k]] <- result$representation
+          # updating the cache
+          cache[[cache_name]] <- list()
+          cache[[cache_name]]$intervals <- intervals
+          #cache[[cache_name]]$representation <- result$representation
+          #k <- k+1
+        }
+      }
+    else{
+      s <- P_adj[[i]]
+      intervals <- list()
+      intervals$start <- s$timestamp
+      intervals$end <- s$timestamp
+      l <- length(s$timestamp)
+      intervals$symbol <- rep(name, l)
+    }
+    input_table[[i]] <- intervals
+  }
+  input_table  <- rbindlist(input_table)
+  setorder(input_table, start, end, symbol)
+  return(list(table = input_table, start = start, end = end, representations = representation, cache = cache))
+}
+
+# Writing partition tables to files: SAX done
+# LEVEL: from 63 to 535
 no_tuples <- nrow(tuples)
 cache <- list()
 patterns <- list()
-dir.create("/local/converted_partition/")
-for(i in 1:no_tuples){
-  dir.create(paste0("/local/converted_partition/partition_",i))
+dir.create("/local/converted_partition_level/")
+for(i in 63:no_tuples){
+  dir.create(paste0("/local/converted_partition_level/partition_",i))
   text = paste0("Processing partition: ",i)
   write(x=text,file="log.txt",append=TRUE)
-  result <- convert_partition_mining(i, cache)
+  result <- convert_partition_level_mining(i, cache)
   j_start <- result$start
   j_end <- result$end
   cache <- result$cache
   input <- result$table
   #input <- input[start >= j_start &  end <= j_end]
   write(x="Partition converted. Writing starts:", file="log.txt", append=TRUE)
-  file = paste0("/local/converted_partition/partition_",i,"/table_",1,".csv")
+  file = paste0("/local/converted_partition_level/partition_",i,"/table_",i,".csv")
   fwrite(x=input, file=file, sep=";")
   write(x="Partition written.", file="log.txt", append=TRUE)
   #   write(x="Partition converted. Pattern mining starts:", file="log.txt", append=TRUE)
@@ -131,85 +342,25 @@ for(i in 1:no_tuples){
   # write(x="Pattern mining ended.", file="log.txt", append=TRUE)
 }
 
-# testing the avg number of events starting in a window of size 5
-sum = 0
-i = 1
-for(s in unique(input$start)){
-  sum <- sum + nrow(input[start >= s & start <= (s+10)])
-  i <- i +1
-}
-sum/i
-
-## Test with Ganglia events
-table <- list()
-i <- 1
-for(c in cache){
-  table[[i]] <- c$intervals
-  table[[i]] <- merge_intervals(table[[i]])
-  i <- i+1
-}
-table <- rbindlist(table)
-setorder(table,start,end,symbol)
-
-
-## Test with Hadoop partition
+# TREND: done
+no_tuples <- nrow(tuples)
+cache2 <- list()
 patterns <- list()
-registerDoParallel(cores=10)
-stopImplicitCluster()
-system.time(patterns <- build_tp_patterns_step_par(input_table[1:1000], 2, patterns))
-system.time(patterns <- build_tp_patterns_step(input_table[1:1000], 2, patterns))
-system.time(patterns <- build_tp_patterns_window(table[1:100], 2, patterns))
-patterns <- build_base_tp_patterns_step(input, 0, patterns)
-
-for(i in 1:length(patterns[[1]])){
-  p <- patterns[[1]][[i]]
-  print(paste0(names(patterns[[1]])[i]," frequency: ",p$frequency))
+dir.create("/local/converted_partition_trend/")
+for(i in 1:no_tuples){
+  dir.create(paste0("/local/converted_partition_trend/partition_",i))
+  text = paste0("Processing partition: ",i)
+  write(x=text,file="log.txt",append=TRUE)
+  result <- convert_partition_trend_mining(i, cache2)
+  j_start <- result$start
+  j_end <- result$end
+  cache2 <- result$cache
+  input <- result$table
+  write(x="Partition converted. Writing starts:", file="log.txt", append=TRUE)
+  file = paste0("/local/converted_partition_trend/partition_",i,"/table_",i,".csv")
+  fwrite(x=input, file=file, sep=";")
+  write(x="Partition written.", file="log.txt", append=TRUE)
 }
-
-for(i in 1:length(patterns[[2]])){
-  p <- patterns[[2]][[i]]
-  print(paste0(names(patterns[[2]])[i]," frequency: ",p$frequency))
-}
-
-for(i in 1:length(patterns[[3]])){
-  p <- patterns[[3]][[i]]
-  rel <- p$relations
-  if(p$frequency>1){
-    print(rel[!is.na(rel)])
-    print(paste0("frequency: ",p$frequency))
-    for(j in 1:1){
-      table <- rbindlist(p$instances[[j]][[1]])
-      plot(xlim=c(min(table$start)-1,max(table$end)+1), main=paste0("frequency: ",p$frequency), type="n", ylim=c(1,1000*(nrow(table)+1)),0,0)
-      for(k in 1:nrow(table)){
-        t <- table[k]
-        segments(x0=t$start, x1=t$end, y0 = k*1000, lwd=5, pch=5, col="red")
-        text(x=(t$start+t$end)/2, y=k*1000+200, substr(t$symbol, 1,100), col="blue")
-      }
-    }
-    #dev.off()
-  }
-}
-
-for(i in 1:length(patterns[[4]])){
-  p <- patterns[[4]][[i]]
-  rel <- p$relations
-  names <- rbindlist(p$instances[[1]][[1]])$symbol
-  if(p$frequency>500){
-    print(rel[!is.na(rel)])
-    print(paste0("frequency: ",p$frequency))
-    for(j in 1:1){
-      table <- rbindlist(p$instances[[j]][[1]])
-      plot(xlim=c(min(table$start),max(table$end)), main=paste0("frequency: ",p$frequency), type="n", ylim=c(1,1000*(nrow(table)+1)),0,0)
-      for(k in 1:nrow(table)){
-        t <- table[k]
-        segments(x0=t$start, x1=t$end, y0 = k*1000, lwd=5, pch=5, col="red")
-        text(x=(t$start+t$end)/2, y=k*1000+200, substr(t$symbol, 1,100), col="blue")
-      }
-    }
-    #dev.off()
-  }
-}
-
 
 
 ## Plotting SAX with 2-3-4-5 cuts
@@ -359,6 +510,99 @@ time_series_to_intervals <- function(data, time, method, parameters, name){
   return(list(intervals=intervals, representation=representation))
 }
 
+############### Testing pattern mining on HADOOP ------------------
+## trend-based partitions
+patterns <- list()
+indexes <- sample(1:no_tuples,50)
+for(index in indexes){
+  # reading converted partition table
+  path <- paste0("/local/converted_partition_trend/partition_",index,"/table_",index,".csv")
+  table <- fread(file=path,sep=";")
+  
+  # reading partition and taking job-relative time window
+  f = Sys.glob(paste0("/local/partitions/partition_",index,"/*.csv")) # get .csv files from partition 
+  no_f <- length(f) 
+  P <- list() # set of event types
+  for(i in 1:no_f){ # build partition reading files
+    #i = 1
+    name = tools::file_path_sans_ext(f[[i]])
+    name <- basename(name)
+    name <- tail(strsplit(name,paste0("part_",index,"_"))[[1]],1)
+    # print(paste0("Reading: ", name))
+    P[[name]] = fread(f[i], 
+                      sep = ",",
+                      select = c("nodeNumber","jobId", "taskId", "attemptID", "value", "timestamp"),
+                      integer64="numeric")
+    if(name=="HadoopDataActivity"){ # converting Hadoop Data Activity into positive and negative values
+      p <- P[[name]]
+      p <- list("positive" = p[p$value >= 0], "negative" = p[p$value < 0])
+      P[[name]] <- NULL
+      if(nrow(p$positive) > 0){
+        P[[length(P)+1]] <- p$positive
+        names(P)[[length(P)]] <- "Hadoop_positive"
+      }
+      if(nrow(p$negative) > 0){
+        P[[length(P)+1]] <- p$negative
+        names(P)[[length(P)]] <- "Hadoop_negative"
+      }
+    }
+  }
+  # adjusting timestamps and getting time limits relative to the job
+  result <- time_adjust_partition(P)
+  min <- result$start
+  max <- result$end
+  node <- P$boottime_event$nodeNumber[1]
+  job <- P$MapStart$jobId[1]
+  table <- table[start >= min & end <= max]
+  system.time(patterns <- build_tp_patterns_step_par(table, 5, patterns))
+}
+
+for(i in 1:length(patterns[[2]])){
+  p <- patterns[[2]][[i]]
+  if(p$frequency>20)
+    print(paste0(names(patterns[[2]])[i]," frequency: ",p$frequency))
+}
+
+for(i in 1:length(patterns[[3]])){
+  p <- patterns[[3]][[i]]
+  rel <- p$relations
+  if(p$frequency>1){
+    print(rel[!is.na(rel)])
+    print(paste0("frequency: ",p$frequency))
+    for(j in 1:1){
+      table <- rbindlist(p$instances[[j]][[1]])
+      plot(xlim=c(min(table$start)-1,max(table$end)+1), main=paste0("frequency: ",p$frequency), type="n", ylim=c(1,1000*(nrow(table)+1)),0,0)
+      for(k in 1:nrow(table)){
+        t <- table[k]
+        segments(x0=t$start, x1=t$end, y0 = k*1000, lwd=5, pch=5, col="red")
+        text(x=(t$start+t$end)/2, y=k*1000+200, substr(t$symbol, 1,100), col="blue")
+      }
+    }
+    #dev.off()
+  }
+}
+
+for(i in 1:length(patterns[[4]])){
+  p <- patterns[[4]][[i]]
+  rel <- p$relations
+  names <- rbindlist(p$instances[[1]][[1]])$symbol
+  if(p$frequency>500){
+    print(rel[!is.na(rel)])
+    print(paste0("frequency: ",p$frequency))
+    for(j in 1:1){
+      table <- rbindlist(p$instances[[j]][[1]])
+      plot(xlim=c(min(table$start),max(table$end)), main=paste0("frequency: ",p$frequency), type="n", ylim=c(1,1000*(nrow(table)+1)),0,0)
+      for(k in 1:nrow(table)){
+        t <- table[k]
+        segments(x0=t$start, x1=t$end, y0 = k*1000, lwd=5, pch=5, col="red")
+        text(x=(t$start+t$end)/2, y=k*1000+200, substr(t$symbol, 1,100), col="blue")
+      }
+    }
+    #dev.off()
+  }
+}
+
+
 ############### Sketching the mining algorithm (Top-k temporal patterns) -------------
 
 ## Relations are build "left-to-right" (e.g. a.end <= b.start, b.end <= c.start):
@@ -379,7 +623,8 @@ temporal_relation <- function(symbols, k){
       }
     }
   }
-  result <- list(relations = r, instances = list(symbols))
+  #result <- list(relations = r, instances = list(symbols))
+  result <- list(relations = r , instances = length(symbols))
   return(result)
 }
 bi_relation <- function(a, b, k){
@@ -392,6 +637,16 @@ bi_relation <- function(a, b, k){
   return(text)
 }
 
+search_relation <- function(patterns, relation){
+  index = 1
+  flag = 0
+  for(index in 1:length(patterns))
+    if(identical(patterns[[index]]$relations,relation)){
+      flag = index
+      break
+    }
+  return(flag)
+}
 
 ## Structure of a pattern: 
 ## relation is NULL for 1-length, a string for 2-length
@@ -399,7 +654,8 @@ bi_relation <- function(a, b, k){
 ## (they are indexed using the string of relations)
 
 
-## Building base 1-2-3-temporal patterns 
+## Using STEP approach
+## Building base 2-3-temporal patterns
 build_base_tp_patterns_step <- function(partition, step, patterns){
   if(length(patterns)==0){
     patterns <- list()
@@ -435,13 +691,13 @@ build_base_tp_patterns_step <- function(partition, step, patterns){
       if(is.null(p2[[r]])){
         p2[[r]] <- list()
         p2[[r]]$relations <- r
-        p2[[r]]$instances <- list()
-        p2[[r]]$instances[[1]] <- list(current, candidate)
+        # p2[[r]]$instances <- list()
+        # p2[[r]]$instances[[1]] <- list(current, candidate)
         p2[[r]]$frequency <- 1
       }
       else{
         p2[[r]]$frequency <- p2[[r]]$frequency + 1
-        p2[[r]]$instances[[length(p2[[r]]$instances)+1]] <- list(current, candidate)
+        # p2[[r]]$instances[[length(p2[[r]]$instances)+1]] <- list(current, candidate)
       }
       for(k in (j+1):(j+step)){ # extending to 3-pattern
         if(k > nrow(partition) | k < (j+1))
@@ -459,12 +715,12 @@ build_base_tp_patterns_step <- function(partition, step, patterns){
           p3[[index]] <- list()
           p3[[index]]$relations <- r$relations
           p3[[index]]$frequency <- 1
-          p3[[index]]$instances <- list()
-          p3[[index]]$instances[[1]] <- symbols
+          # p3[[index]]$instances <- list()
+          # p3[[index]]$instances[[1]] <- symbols
         }
         else{
           p3[[index]]$frequency <- p3[[index]]$frequency + 1
-          p3[[index]]$instances[[length(p3[[index]]$instances)+1]] <- list(current, candidate, candidate_bis)
+          # p3[[index]]$instances[[length(p3[[index]]$instances)+1]] <- list(current, candidate, candidate_bis)
         }
       }
     }
@@ -474,82 +730,123 @@ build_base_tp_patterns_step <- function(partition, step, patterns){
   patterns[[3]] <- p3
   return(patterns)
 }
-build_base_tp_patterns_window <- function(partition, window, patterns){
+## Building all temporal patterns
+build_tp_patterns_step <- function(partition, step, patterns){
   if(length(patterns)==0){
     patterns <- list()
-    p1 <- list()
-    p2 <- list()
-    p3 <- list()
-  }
-  else{ # if patterns are searched in another partition
-    p1 <- patterns[[1]]
-    p2 <- patterns[[2]]
-    p3 <- patterns[[3]]
+    patterns[[1]] <- list()
   }
   for(i in 1:nrow(partition)){ #partition is a data.table (start,end,symbol)
     current <- partition[i]
     symbol <- current$symbol
     start <- current$start
     end <- current$end
-    # if(is.null(p1[[symbol]])){
-    #   p1[[symbol]]<- list()
-    #   p1[[symbol]]$relations <- NULL
-    #   p1[[symbol]]$instances <- list()
-    #   p1[[symbol]]$instances[[1]] <- current
-    #   p1[[symbol]]$frequency <- 1
+    # if(is.null(patterns[[1]][[symbol]])){
+    #   patterns[[1]][[symbol]]<- list()
+    #   patterns[[1]][[symbol]]$relations <- NULL
+    #   patterns[[1]][[symbol]]$instances <- list()
+    #   patterns[[1]][[symbol]]$instances[[1]] <- list(current)
+    #   patterns[[1]][[symbol]]$frequency <- 1
     # }
-    # else
-    #   p1[[symbol]]$frequency <- p1[[symbol]]$frequency + 1
-    for(j in (i+1):nrow(partition)){ # looping on all the other intervals and building all the candidate 2 patterns including this symbol
-      candidate <- partition[j]
-      if(j>nrow(partition) || candidate$end > (end+window))
-        break
-      r <- bi_relation(current, candidate, 2)
-      # checking if pattern already exists
-      if(is.null(p2[[r]])){
-        p2[[r]] <- list()
-        p2[[r]]$relations <- r
-        p2[[r]]$instances <- list()
-        p2[[r]]$instances[[1]] <- list(current, candidate)
-        p2[[r]]$frequency <- 1
+    # else{
+    #   patterns[[1]][[symbol]]$frequency <- patterns[[1]][[symbol]]$frequency + 1
+    #   patterns[[1]][[symbol]]$instances[[length(patterns[[1]][[symbol]]$instances)+1]] <- symbol
+    # }
+    ## build all the possible left-to-right patterns containing "current" in a right-window of size "step">=1
+    patterns_to_add <- build_all_relations_step(list(current), partition[(i+1):(i+step)])
+    for(p in patterns_to_add){
+      # n <- length(p$instances[[1]])
+      n <- p$instances
+      text <- p$relations
+      index <- paste(text, collapse="-")
+      if(length(patterns) < n)
+        patterns[[n]] <- list()
+      if(is.null(patterns[[n]][[index]])){
+        patterns[[n]][[index]] <- list()
+        patterns[[n]][[index]]$relations <- p$relations
+        patterns[[n]][[index]]$frequency <- 1
+        # patterns[[n]][[index]]$instances <- list()
+        # patterns[[n]][[index]]$instances[[1]] <- p$instances
       }
       else{
-        p2[[r]]$frequency <- p2[[r]]$frequency + 1
-        p2[[r]]$instances[[length(p2[[r]]$instances)+1]] <- list(current, candidate)
-      }
-      for(k in (j+1):nrow(partition)){ # extending to 3-pattern
-        candidate_bis <- partition[k]
-        if(k>nrow(partition) || candidate_bis$end > (end+window))
-          break
-        # computing the relation of order 3 within this symbol and the previous pattern
-        symbols <- list(current, candidate, candidate_bis)
-        r <- temporal_relation(symbols, 2)
-        text <- r$relations
-        index <- paste(text, collapse="-")
-        if(is.null(p3[[index]])){ #checking if pattern already exists
-          # index <- search_pattern(p3, r)
-          # if(index == 0){
-          # index <- length(p3)+1
-          p3[[index]] <- list()
-          p3[[index]]$relations <- r$relations
-          p3[[index]]$frequency <- 1
-          p3[[index]]$instances <- list()
-          p3[[index]]$instances[[1]] <- symbols
-        }
-        else{
-          p3[[index]]$frequency <- p3[[index]]$frequency + 1
-          p3[[index]]$instances[[length(p3[[index]]$instances)+1]] <- r$instances
-        }
+        patterns[[n]][[index]]$frequency <- patterns[[n]][[index]]$frequency + 1
+        # patterns[[n]][[index]]$instances[[length(patterns[[n]][[index]]$instances)+1]] <- p$instances
       }
     }
   }
-  patterns[[1]] <- p1
-  patterns[[2]] <- p2
-  patterns[[3]] <- p3
+  return(patterns)
+}
+## Recursive functions to build all relations
+build_all_relations_step <- function(current, partition, step){
+  patterns <- list()
+  if(length(current)!=1) # first recursion level: a symbol calls himself
+    patterns[[1]] <- temporal_relation(current, 2)
+  for(j in 1:nrow(partition)){ # gathering all the candidates
+    candidate <- partition[j]
+    if(is.na(candidate$start)){
+      break
+    }
+    temp <- current
+    temp[[length(temp)+1]] <- candidate
+    patterns_to_add <- build_all_relations_step(temp, partition[j+1:nrow(partition)])
+    for(p in patterns_to_add){
+      patterns[[length(patterns)+1]] <- p
+    }
+  }
+  return(patterns)
+}
+## Parallel version
+build_tp_patterns_step_par <- function(partition, step, patterns){
+  if(length(patterns)==0){
+    patterns <- list()
+  }
+  patterns_to_add <- list()
+  registerDoParallel(cores=20)
+  # result <- foreach(i=1:nrow(partition)) %dopar% {
+  result <- foreach(i=seq(1,nrow(partition),10)) %dopar% {
+    current <- partition[i]
+    symbol <- current$symbol
+    start <- current$start
+    end <- current$end
+    # write(x=paste0("Doing event: ",i), file="log.txt", append=TRUE)
+    build_all_relations_step(list(current), partition[(i+1):(i+step)])
+  }
+  stopImplicitCluster()
+  print("Fine costruzione.")
+  patterns_to_add <- unlist(result, recursive=FALSE)
+  i <- 1
+  while(i <= length(patterns_to_add)){
+    # write(x=paste0(i, " "), file="log2.txt", append=TRUE)
+    p <- patterns_to_add[[i]]
+    n <- as.character(p$instances)
+    text <- p$relations
+    # index <- paste(text, collapse="-") # list index based on the relation
+    if(is.null(patterns[[n]])){
+      patterns[[n]] <- list()
+      index = 0
+    }
+    else
+      index <- search_relation(patterns[[n]], text) # search in the list of patterns
+    # if(is.null(patterns[[n]][[index]])){
+    if(index == 0){
+      index = length(patterns[[n]])+1
+      patterns[[n]][[index]] <- list()
+      patterns[[n]][[index]]$relations <- text
+      patterns[[n]][[index]]$frequency <- 1
+      # patterns[[n]][[index]]$instances <- list()
+      # patterns[[n]][[index]]$instances[[1]] <- p$instances
+    }
+    else{
+      patterns[[n]][[index]]$frequency <- patterns[[n]][[index]]$frequency + 1
+      # patterns[[n]][[index]]$instances[[length(patterns[[n]][[index]]$instances)+1]] <- p$instances
+    }
+    patterns_to_add[[i]] <- NULL
+    i <- i+1
+  }
   return(patterns)
 }
 
-## Building all temporal patterns
+## same for TIME approach
 build_tp_patterns_window <- function(partition, window, patterns){
   if(length(patterns)==0){
     patterns <- list()
@@ -594,52 +891,6 @@ build_tp_patterns_window <- function(partition, window, patterns){
   }
   return(patterns)
 }
-build_tp_patterns_step <- function(partition, step, patterns){
-  if(length(patterns)==0){
-    patterns <- list()
-    patterns[[1]] <- list()
-  }
-  for(i in 1:nrow(partition)){ #partition is a data.table (start,end,symbol)
-    current <- partition[i]
-    symbol <- current$symbol
-    start <- current$start
-    end <- current$end
-    # if(is.null(patterns[[1]][[symbol]])){
-    #   patterns[[1]][[symbol]]<- list()
-    #   patterns[[1]][[symbol]]$relations <- NULL
-    #   patterns[[1]][[symbol]]$instances <- list()
-    #   patterns[[1]][[symbol]]$instances[[1]] <- list(current)
-    #   patterns[[1]][[symbol]]$frequency <- 1
-    # }
-    # else{
-    #   patterns[[1]][[symbol]]$frequency <- patterns[[1]][[symbol]]$frequency + 1
-    #   patterns[[1]][[symbol]]$instances[[length(patterns[[1]][[symbol]]$instances)+1]] <- symbol
-    # }
-    ## build all the possible left-to-right patterns containing "current" in a right-window of size "step">=1
-    patterns_to_add <- build_all_relations_step(list(current), partition[(i+1):(i+step)])
-    for(p in patterns_to_add){
-      n <- length(p$instances[[1]])
-      text <- p$relations
-      index <- paste(text, collapse="-")
-      if(length(patterns) < n)
-        patterns[[n]] <- list()
-      if(is.null(patterns[[n]][[index]])){
-        patterns[[n]][[index]] <- list()
-        patterns[[n]][[index]]$relations <- p$relations
-        patterns[[n]][[index]]$frequency <- 1
-        patterns[[n]][[index]]$instances <- list()
-        patterns[[n]][[index]]$instances[[1]] <- p$instances
-      }
-      else{
-        patterns[[n]][[index]]$frequency <- patterns[[n]][[index]]$frequency + 1
-        patterns[[n]][[index]]$instances[[length(patterns[[n]][[index]]$instances)+1]] <- p$instances
-      }
-    }
-  }
-  return(patterns)
-}
-
-## Recursive functions to build all relations
 build_all_relations_window <- function(current, partition, index, limit){
   patterns <- list()
   if(length(current)!=1) # first recursion level: a symbol calls himself
@@ -659,38 +910,86 @@ build_all_relations_window <- function(current, partition, index, limit){
   }
   return(patterns)
 }
-build_all_relations_step <- function(current, partition, step){
-  patterns <- list()
-  if(length(current)!=1) # first recursion level: a symbol calls himself
-    patterns[[1]] <- temporal_relation(current, 2)
-  for(j in 1:nrow(partition)){ # gathering all the candidates
-    candidate <- partition[j]
-    if(is.na(candidate$start)){
-      break
-    }
-    temp <- current
-    temp[[length(temp)+1]] <- candidate
-    patterns_to_add <- build_all_relations_step(temp, partition[j+1:nrow(partition)])
-    for(p in patterns_to_add){
-      patterns[[length(patterns)+1]] <- p
+build_base_tp_patterns_window <- function(partition, window, patterns){
+  if(length(patterns)==0){
+    patterns <- list()
+    p1 <- list()
+    p2 <- list()
+    p3 <- list()
+  }
+  else{ # if patterns are searched in another partition
+    p1 <- patterns[[1]]
+    p2 <- patterns[[2]]
+    p3 <- patterns[[3]]
+  }
+  for(i in 1:nrow(partition)){ #partition is a data.table (start,end,symbol)
+    current <- partition[i]
+    symbol <- current$symbol
+    start <- current$start
+    end <- current$end
+    # if(is.null(p1[[symbol]])){
+    #   p1[[symbol]]<- list()
+    #   p1[[symbol]]$relations <- NULL
+    #   p1[[symbol]]$instances <- list()
+    #   p1[[symbol]]$instances[[1]] <- current
+    #   p1[[symbol]]$frequency <- 1
+    # }
+    # else
+    #   p1[[symbol]]$frequency <- p1[[symbol]]$frequency + 1
+    for(j in (i+1):nrow(partition)){ # looping on all the other intervals and building all the candidate 2 patterns including this symbol
+      candidate <- partition[j]
+      if(j>nrow(partition) || candidate$start > (end+window))
+        break
+      r <- bi_relation(current, candidate, 2)
+      # checking if pattern already exists
+      if(is.null(p2[[r]])){
+        p2[[r]] <- list()
+        p2[[r]]$relations <- r
+        p2[[r]]$instances <- list()
+        p2[[r]]$instances[[1]] <- list(current, candidate)
+        p2[[r]]$frequency <- 1
+      }
+      else{
+        p2[[r]]$frequency <- p2[[r]]$frequency + 1
+        p2[[r]]$instances[[length(p2[[r]]$instances)+1]] <- list(current, candidate)
+      }
+      for(k in (j+1):nrow(partition)){ # extending to 3-pattern
+        candidate_bis <- partition[k]
+        if(k>nrow(partition) || candidate_bis$start > (end+window))
+          break
+        # computing the relation of order 3 within this symbol and the previous pattern
+        symbols <- list(current, candidate, candidate_bis)
+        r <- temporal_relation(symbols, 2)
+        text <- r$relations
+        index <- paste(text, collapse="-")
+        if(is.null(p3[[index]])){ #checking if pattern already exists
+          # index <- search_pattern(p3, r)
+          # if(index == 0){
+          # index <- length(p3)+1
+          p3[[index]] <- list()
+          p3[[index]]$relations <- r$relations
+          p3[[index]]$frequency <- 1
+          p3[[index]]$instances <- list()
+          p3[[index]]$instances[[1]] <- symbols
+        }
+        else{
+          p3[[index]]$frequency <- p3[[index]]$frequency + 1
+          p3[[index]]$instances[[length(p3[[index]]$instances)+1]] <- r$instances
+        }
+      }
     }
   }
+  patterns[[1]] <- p1
+  patterns[[2]] <- p2
+  patterns[[3]] <- p3
   return(patterns)
 }
-
-
-## Testing forEach
-## Building all temporal patterns
-library(doParallel)
-registerDoParallel(cores=2)
-stopImplicitCluster()
-
 build_tp_patterns_window_par <- function(partition, window, patterns){
   if(length(patterns)==0){
     patterns <- list()
   }
   patterns_to_add <- list()
-  result <- foreach(i=1:nrow(partition), .verbose=TRUE) %dopar% {
+  result <- foreach(i=1:nrow(partition)) %dopar% {
     current <- partition[i]
     symbol <- current$symbol
     start <- current$start
@@ -700,7 +999,8 @@ build_tp_patterns_window_par <- function(partition, window, patterns){
   }
   patterns_to_add <- unlist(result, recursive=FALSE)
   print("Fine costruzione.")
-  for(i in 1:length(patterns_to_add)){
+  i <- 1
+  while(i <=length(patterns_to_add)){
     p <- patterns_to_add[[i]]
     n <- length(p$instances[[1]])
     text <- p$relations
@@ -718,43 +1018,7 @@ build_tp_patterns_window_par <- function(partition, window, patterns){
       patterns[[n]][[index]]$frequency <- patterns[[n]][[index]]$frequency + 1
       patterns[[n]][[index]]$instances[[length(patterns[[n]][[index]]$instances)+1]] <- p$instances
     }
-  }
-  return(patterns)
-}
-build_tp_patterns_step_par <- function(partition, step, patterns){
-  if(length(patterns)==0){
-    patterns <- list()
-    patterns[[1]] <- list()
-  }
-  patterns_to_add <- list()
-  result <- foreach(i=1:nrow(partition), .verbose=TRUE) %dopar% {
-    current <- partition[i]
-    symbol <- current$symbol
-    start <- current$start
-    end <- current$end
-    # we don't care about the 1-lenght patterns
-    build_all_relations_step(list(current), partition[(i+1):(i+step)])
-  }
-  patterns_to_add <- unlist(result, recursive=FALSE)
-  print("Fine costruzione.")
-  for(i in 1:length(patterns_to_add)){
-    p <- patterns_to_add[[i]]
-    n <- length(p$instances[[1]])
-    text <- p$relations
-    index <- paste(text, collapse="-")
-    if(length(patterns) < n)
-      patterns[[n]] <- list()
-    if(is.null(patterns[[n]][[index]])){
-      patterns[[n]][[index]] <- list()
-      patterns[[n]][[index]]$relations <- p$relations
-      patterns[[n]][[index]]$frequency <- 1
-      patterns[[n]][[index]]$instances <- list()
-      patterns[[n]][[index]]$instances[[1]] <- p$instances
-    }
-    else{
-      patterns[[n]][[index]]$frequency <- patterns[[n]][[index]]$frequency + 1
-      patterns[[n]][[index]]$instances[[length(patterns[[n]][[index]]$instances)+1]] <- p$instances
-    }
+    patterns_to_add[[i]] <- NULL
   }
   return(patterns)
 }
@@ -910,13 +1174,16 @@ partition <- list_of_partition[[1]]
 for(partition in list_of_partition){ # scanning partitions
   #candidates <- build_base_tp_patterns_step(partition, 0, patterns) # building candidate patterns from signals in the partition
   #candidates <- build_base_tp_patterns_window(partition, 1.5/lambda, patterns)
-  candidates <- build_tp_patterns_window(partition, 1/lambda, patterns)
-  #candidates <- build_tp_patterns_step(partition, 2, patterns)
+  candidates <- build_tp_patterns_window(partition, 4/lambda, patterns)
   patterns[[1]] <- candidates[[1]]
   patterns[[2]] <- candidates[[2]]
   patterns[[3]] <- candidates[[3]]
 }
-# outputting top-10 patterns for 2 lengths
+# outputting top-10 patterns for 3 lengths
+for(i in 1:length(patterns[[1]])){
+  p <- patterns[[1]][[i]]
+  print(paste0(names(patterns[[1]])[i]," frequency: ",p$frequency))
+}
 
 for(i in 1:length(patterns[[2]])){
   p <- patterns[[2]][[i]]
@@ -929,18 +1196,18 @@ for(i in 1:length(patterns[[3]])){
   print(rel[!is.na(rel)])
   print(paste0("frequency: ",p$frequency))
   # if(nrow(rbindlist(p$instances[[1]])[symbol=="fire.yes"])>1){
-  if(p$frequency>30){
-    for(j in 1:1){
-      table <- rbindlist(p$instances[[j]][[1]])
-      plot(xlim=c(min(table$start),max(table$end)), main=paste0("frequency: ",p$frequency), type="n", ylim=c(1,1000*(nrow(table)+1)),0,0)
-      for(k in 1:nrow(table)){
-        t <- table[k]
-        segments(x0=t$start, x1=t$end, y0 = k*1000, lwd=5, pch=5, col="red")
-        text(x=(t$start+t$end)/2, y=k*1000+200, substr(t$symbol, 1,100), col="blue")
-      }
-    }
-    #dev.off()
-  }
+  # if(p$frequency>1){
+  #   for(j in 1:1){
+  #     table <- rbindlist(p$instances[[j]][[1]])
+  #     plot(xlim=c(min(table$start),max(table$end)), main=paste0("frequency: ",p$frequency), type="n", ylim=c(1,1000*(nrow(table)+1)),0,0)
+  #     for(k in 1:nrow(table)){
+  #       t <- table[k]
+  #       segments(x0=t$start, x1=t$end, y0 = k*1000, lwd=5, pch=5, col="red")
+  #       text(x=(t$start+t$end)/2, y=k*1000+200, substr(t$symbol, 1,100), col="blue")
+  #     }
+  #   }
+  #   #dev.off()
+  # }
 }
 
 
@@ -951,7 +1218,7 @@ no_ids = 10 # no. of stocks
 ## generating time series and news events
 ## normal behaviour: up-flat-down-flat or down-flat-up-flat (no abrupt changes)
 ts <- list()
-news_events <- list()
+#news_events <- list()
 for(i in 1:no_ids){ # generating stock signals of about 1000 points each
   rm(.Random.seed)
   offset <- 0
@@ -989,7 +1256,7 @@ for(i in 1:no_ids){ # generating stock signals of about 1000 points each
     }
     else{ # big news: up (down) - down (up)
       print(paste0("Abrupt for product: ",i, " at time=",start))
-      news_events[[length(news_events)+1]] <- list("type"="news", "value"=0, "id"=i,"timestamp"=start)
+      #news_events[[length(news_events)+1]] <- list("type"="news", "value"=0, "id"=i,"timestamp"=start)
       
       z <- -sign*(1:x3 + 1:x3*atan(1:x3) + log(1:x3)^3 + sqrt(1:x3))
       y[start:(start+x3-1)] <- z + rep(offset,(x3))
@@ -1008,7 +1275,7 @@ for(i in 1:no_ids){ # generating stock signals of about 1000 points each
 }
 
 # building the stream of stock event
-lambda = 1/60
+lambda = 1/120
 ts_events <- list()
 for(i in 1:length(ts)){
   ts_events[[i]] <- list()
@@ -1023,13 +1290,13 @@ for(i in 1:length(ts)){
   ts_events[[i]] <- rbindlist(ts_events[[i]])
 }
 # updating the news events timestamps accordingly
-for(n in 1:length(news_events)){
-  news <- news_events[[n]]
-  news$timestamp <- ts_events[[news$id]][news$timestamp]$timestamp
-  news_events[[n]] <- news
-}
+# for(n in 1:length(news_events)){
+#   news <- news_events[[n]]
+#   news$timestamp <- ts_events[[news$id]][news$timestamp]$timestamp
+#   news_events[[n]] <- news
+# }
 ts_events <- rbindlist(ts_events)
-news_events <- rbindlist(news_events)
+# news_events <- rbindlist(news_events)
 stream <- list(ts_events)
 stream <- rbindlist(stream)
 setorder(stream, timestamp, type)
@@ -1039,16 +1306,16 @@ list_of_partition <- list()
 for(s in 1:no_ids){
   stock <- stream[id == s & type=="stock"]
   stock <- list("value"=stock$value,"time"=stock$timestamp)
-  stock <- time_series_to_intervals(stock$value,stock$time,"trend",c(10,20,0.01), paste0("stock"))
-  news <- news_events[id == s]
-  news$start <- news$timestamp
-  news$end <- news$timestamp
-  news$symbol <- news$type
-  news$id <- NULL
-  news$timestamp <- NULL
-  news$type <- NULL
-  news$value <- NULL
-  input_table <- list(stock$intervals, news)
+  stock <- time_series_to_intervals(stock$value,stock$time,"trend",c(7,20,0.01), paste0("stock"))
+  # news <- news_events[id == s]
+  # news$start <- news$timestamp
+  # news$end <- news$timestamp
+  # news$symbol <- news$type
+  # news$id <- NULL
+  # news$timestamp <- NULL
+  # news$type <- NULL
+  # news$value <- NULL
+  input_table <- list(stock$intervals,news)
   input_table  <- rbindlist(input_table)
   setorder(input_table, start, end, symbol)
   list_of_partition[[s]] <- input_table
@@ -1056,27 +1323,24 @@ for(s in 1:no_ids){
 
 patterns <- list()
 for(partition in list_of_partition){ # scanning partitions
-  candidates <- build_tp_patterns_window(partition, 20/lambda, patterns) # building candidate patterns from signals in the partition
+  candidates <- build_base_tp_patterns_step(partition, 0, patterns) # building candidate patterns from signals in the partition
   #candidates <- build_base_tp_patterns_window(partition, 1.5/lambda, patterns)
   patterns[[1]] <- candidates[[1]]
   patterns[[2]] <- candidates[[2]]
   patterns[[3]] <- candidates[[3]]
 }
-# outputting top-10 patterns for 2 lengths
+# outputting top-10 patterns for 3 lengths
+for(i in 1:length(patterns[[1]])){
+  p <- patterns[[1]][[i]]
+  print(paste0(names(patterns[[1]])[i]," frequency: ",p$frequency))
+}
+
 for(i in 1:length(patterns[[2]])){
   p <- patterns[[2]][[i]]
   print(paste0(names(patterns[[2]])[i]," frequency: ",p$frequency))
-}
-
-for(i in 1:length(patterns[[3]])){
-  p <- patterns[[3]][[i]]
-  rel <- p$relations
-  print(rel[!is.na(rel)])
-  print(paste0("frequency: ",p$frequency))
-  # if(nrow(rbindlist(p$instances[[1]])[symbol=="fire.yes"])>1){
-  if(p$frequency<30){
+  if(p$frequency>=20){
     for(j in 1:1){
-      table <- rbindlist(p$instances[[j]][[1]])
+      table <- rbindlist(p$instances[[j]])
       plot(xlim=c(min(table$start),max(table$end)), main=paste0("frequency: ",p$frequency), type="n", ylim=c(1,1000*(nrow(table)+1)),0,0)
       for(k in 1:nrow(table)){
         t <- table[k]
@@ -1088,6 +1352,25 @@ for(i in 1:length(patterns[[3]])){
   }
 }
 
+for(i in 1:length(patterns[[3]])){
+  p <- patterns[[3]][[i]]
+  rel <- p$relations
+  print(rel[!is.na(rel)])
+  print(paste0("frequency: ",p$frequency))
+  # if(nrow(rbindlist(p$instances[[1]])[symbol=="fire.yes"])>1){
+  if(p$frequency>10){
+    for(j in 1:1){
+      table <- rbindlist(p$instances[[j]])
+      plot(xlim=c(min(table$start),max(table$end)), main=paste0("frequency: ",p$frequency), type="n", ylim=c(1,1000*(nrow(table)+1)),0,0)
+      for(k in 1:nrow(table)){
+        t <- table[k]
+        segments(x0=t$start, x1=t$end, y0 = k*1000, lwd=5, pch=5, col="red")
+        text(x=(t$start+t$end)/2, y=k*1000+200, substr(t$symbol, 1,100), col="blue")
+      }
+    }
+    #dev.off()
+  }
+}
 
 
 ############### Fire case ------------
@@ -1141,12 +1424,12 @@ for(a in 1:no_areas){
   t <- stream[area == a & type=="temperature"]
   t <- list("value"=as.numeric(t$value),"timestamp"=as.numeric(t$timestamp))
   temp_int <- time_series_to_intervals(t$value, t$timestamp,"level",list(5,0), "temp")
-  #level_plot(t$value, temp_int$representation, 5)
+  level_plot(t$value, temp_int$representation, 5)
   
   h <- stream[area == a & type=="humidity"]
   h <- list("value"=as.numeric(h$value),"timestamp"=as.numeric(h$timestamp))
   hum_int <- time_series_to_intervals(h$value, h$timestamp,"level",list(5,0), "hum")
-  #level_plot(h$value, hum_int$representation, 5)
+  level_plot(h$value, hum_int$representation, 5)
   
   others <- stream[area==a & type == "fire"]
   others$area <- NULL
@@ -1165,16 +1448,33 @@ for(a in 1:no_areas){
 
 patterns <- list()
 for(partition in list_of_partition){ # scanning partitions
-  candidates <- build_tp_patterns_step(partition, 2, patterns) # building candidate patterns from signals in the partition
-  #candidates <- build_base_tp_patterns_window(partition, 1.5/lambda, patterns)
+  #candidates <- build_base_tp_patterns_step(partition, 2, patterns) # building candidate patterns from signals in the partition
+  candidates <- build_tp_patterns_step(partition, 5, patterns)
   patterns[[1]] <- candidates[[1]]
   patterns[[2]] <- candidates[[2]]
   patterns[[3]] <- candidates[[3]]
 }
-# outputting top-10 patterns for 2 lengths
+# outputting top-10 patterns for 3 lengths
+for(i in 1:length(patterns[[1]])){
+  p <- patterns[[1]][[i]]
+  print(paste0(names(patterns[[1]])[i]," frequency: ",p$frequency))
+}
+
 for(i in 1:length(patterns[[2]])){
   p <- patterns[[2]][[i]]
   print(paste0(names(patterns[[2]])[i]," frequency: ",p$frequency))
+  # if(p$frequency>=20){
+  #   for(j in 1:1){
+  #     table <- rbindlist(p$instances[[j]])
+  #     plot(xlim=c(min(table$start),max(table$end)), main=paste0("frequency: ",p$frequency), type="n", ylim=c(1,1000*(nrow(table)+1)),0,0)
+  #     for(k in 1:nrow(table)){
+  #       t <- table[k]
+  #       segments(x0=t$start, x1=t$end, y0 = k*1000, lwd=5, pch=5, col="red")
+  #       text(x=(t$start+t$end)/2, y=k*1000+200, substr(t$symbol, 1,100), col="blue")
+  #     }
+  #   }
+  #   #dev.off()
+  # }
 }
 
 for(i in 1:length(patterns[[3]])){
@@ -1183,7 +1483,7 @@ for(i in 1:length(patterns[[3]])){
   print(rel[!is.na(rel)])
   print(paste0("frequency: ",p$frequency))
   # if(nrow(rbindlist(p$instances[[1]])[symbol=="fire.yes"])>1){
-  if(p$frequency<10){
+  if(nrow(rbindlist(p$instances[[1]][[1]])[symbol=="fire.yes"])>=1){
     for(j in 1:1){
       table <- rbindlist(p$instances[[j]][[1]])
       plot(xlim=c(min(table$start),max(table$end)), main=paste0("frequency: ",p$frequency), type="n", ylim=c(1,1000*(nrow(table)+1)),0,0)

@@ -3,7 +3,7 @@ library(trend)
 library(boot)
 library(DAAG)
 
-## Sliding window algorithms and variations (max size and final merging)
+## Sliding window and variations (max size and final merging)
 build_trends_window <- function(p, w, alpha){
   trends <- list()
   i = 1
@@ -123,7 +123,7 @@ build_trends_window_max_merge <- function(p, w, M, alpha){
   return(trends)
 }
 
-## Bottom-up algorithms and variations (best merge and max size)
+## Bottom-up and variations (best merge and max size)
 build_trends_bottom_up <- function(p, w, alpha){
   trends <- list()
   i <- 1
@@ -409,7 +409,7 @@ build_trends_SWAB_merge <- function(p, w, M, alpha){
 ## Functions to:
 ## (1) merge adjacent trends
 ## (2) plot a trend-segmented time series with (3) Kendall-Theil-Sen robust line
-## and (4) plot all the trend segments for a time series
+## and (4) plot multiple trend segments for a same time series
 merge_trends <- function(p,trends, alpha){
   flag = 0
   while(flag==0){# until no more merges are possible
@@ -453,7 +453,7 @@ plot_trends <- function(p, trends, method, alpha){
     a <- t[["index"]][1]
     b <- t[["index"]][2]
     if(a!=d){
-      lines(y=p[d:(a-1)],x=c(d:(a-1)), type="l", lwd = 4, col="black")
+      lines(y=p[d:(a-1)],x=c(d:(a-1)), type="l", col="black")
       abline(v=d,col="black")
       abline(v=(a-1),col="black")
     }
@@ -461,13 +461,13 @@ plot_trends <- function(p, trends, method, alpha){
       c = 2
     else
       c = 4
-    lines(y=p[a:b],x=a:b,type="l",col=c,lwd=4)
+    lines(y=p[a:b],x=a:b,type="l",col=c)
     abline(v=a,col=c)
     abline(v=b,col=c)
     d <- b+1
   }
   if(d!=length(p)){
-    lines(y=p[d:length(p)],x=c(d:length(p)), type="l", lwd = 4, col="black")
+    lines(y=p[d:length(p)],x=c(d:length(p)), type="l", col="black")
     abline(v=d,col="black")
     abline(v=length(p),col="black")
   }
@@ -651,11 +651,11 @@ plot_synthetic <- function(r){
       c = "blue"
     else c="black"
     
-    lines(x=start:end,y[start:end],type="o",col=c, lwd=2)
+    lines(x=start:end,y[start:end],type="l",col=c, lwd=2)
     abline(v=bp)
   }
 }
-## "Edit distance"-based error computation for trend-segmentation
+## "Added distances" error computation
 error_synthetic <- function(r, trends){
   s <- r$samples
   y <- unlist(s)
@@ -689,12 +689,15 @@ error_synthetic <- function(r, trends){
     signs_two[t$index[1]:t$index[2]] <- s
   }
   s <- signs_two - signs_one
-  return(length(s[abs(s) == 1]))
+  return(length(s[s != 0]))
 }
 
-## Synthetic dataset evaluation performances (for each noise, for each alpha, for each w, for each M)
+########### Synthetic dataset evaluation performances --------------
+
+## HYPERPARAMETER SELECTION
+
+## trying all methods with different parameters
 stats <- list()
-# computing errors for all the runs
 for(noise in c(0.01,0.05,0.1)){
   s <- as.character(noise)
   stats[[s]] <- list()
@@ -716,7 +719,7 @@ for(noise in c(0.01,0.05,0.1)){
   
   result <- synthetic(20, 2000, noise, 10)
   #pdf(paste0(noise,"_synthetic.pdf"))
-  
+  print(paste0("Doing noise: ",noise," alpha: ",alpha))
   for(r in result){ # looping on synthetic signals
     #plot_synthetic(r)
     p <- r$samples
@@ -815,64 +818,287 @@ for(noise in c(0.01,0.05,0.1)){
   }
   # dev.off()
 }
-
-# computing total error and average time/error
+# hyperparameter selection: taking the best parameters
+hyper <- list()
 for(noise in c(0.01,0.05,0.1)){
   s <- as.character(noise)
+  hyper[[s]] <- matrix(nrow=9,ncol=3)
+  hyper[[s]][,1] = rep(Inf,9)
+  rownames(hyper[[s]]) <- rownames(stats[[s]]$`0.05`)
   for(alpha in c(0.05,0.02,0.01)){
     a <- as.character(alpha)
-    stats[[s]][[a]] <- cbind(stats[[s]][[a]], rep(0,9))
-    stats[[s]][[a]] <- cbind(stats[[s]][[a]], rep(0,9))
-    colnames(stats[[s]][[a]])[32] <- "total_error"
-    colnames(stats[[s]][[a]])[33] <- "avg_error"
-    rownames(stats[[s]][[a]]) <- c("window", "bottom-up","bottom-up-opt","bottom-up-opt-max","win-max","win-max-merge","bottom_up_opt_max_merge","swab","swab-merge")
-    for(row in 1:9){ # computing avg_time, avg_error, total_error
-      table <- data.frame(stats[[s]][[a]][row])
-      table <- table[1:30]
-      numbers <- table[table!=0]
-      total_error <- sum(numbers)
-      avg_error <- total_error/length(numbers)
-      stats[[s]][[a]][row,31] <- stats[[s]][[a]][row,31]/length(numbers)
-      stats[[s]][[a]][row,32] <- total_error
-      stats[[s]][[a]][row,33] <- avg_error
+    for(row in 1:9){ # computing total_error for each method
+      table <- stats[[s]][[a]][row]
+      table <- unlist(table)[1:30]
+      m = min(table[table!=0])
+      index <- which(table==m)[1]
+      error <- table[index]
+      if(error < hyper[[s]][row,1]){
+        hyper[[s]][row,1] <- error[1]
+        hyper[[s]][row,2] <- colnames(stats[[s]][[a]])[index]
+        hyper[[s]][row,3] <- a
+      }
     }
-    table <- data.frame(stats[[s]][[a]])
-    m <- head(sort(table[,33]),3)
-    first <- rownames(stats[[s]][[a]])[which(table[,33] %in% m[1])]
-    second <- rownames(stats[[s]][[a]])[which(table[,33] %in% m[2])]
-    third <- rownames(stats[[s]][[a]])[which(table[,33] %in% m[3])]
-    print(paste0("Noise= ",noise," alpha=",alpha," FIRST=",first, " Avg_Error=",m[1], " Total_error=",table[which(table[,33] %in% m[1]),32]))
-    print(paste0("Noise= ",noise," alpha=",alpha," SECOND=",second, " Avg_Error=",m[2]," Total_error=",table[which(table[,33] %in% m[2]),32]))
-    print(paste0("Noise= ",noise," alpha=",alpha," THIRD=",third, " Avg_Error=",m[3]," Total_error=",table[which(table[,33] %in% m[3]),32]))
-    print("")
-    #write.table(stats[[s]][[a]],file=paste0("noise:",noise,"_alpha:",alpha,".csv"),dec=",",sep=";",col.names=NA)
   }
+  write.table(hyper[[s]],file=paste0("Hyperparameter:",noise,".csv"), sep=";",dec=",")
 }
-# avg_total_error for each method
-total <- rep(0,9)
-for(noise in c(0.01,0.05,0.1)){
-  s <- as.character(noise)
-  for(alpha in c(0.05,0.02,0.01)){
-    a <- as.character(alpha)
-    total <- total + stats[[s]][[a]][,33]
-  }
-}
-# computing precision 
-# 9 is 3(no.noise)*3(no.alpha)
-total <- 1-(total/9/20)/2000
 
-# avg_total_time
-total <- rep(0,9)
-for(noise in c(0.01,0.05,0.1)){
-  s <- as.character(noise)
-  for(alpha in c(0.05,0.02,0.01)){
-    a <- as.character(alpha)
-    total <- total + stats[[s]][[a]][,31]
-  }
-}
-total <- total/9/20
+## method comparison
+final_stats <- list()
 
-# test with random walk
+# noise = 1%
+noise = 0.01
+n <- as.character(noise)
+result <- synthetic(20, 2000, noise, 10)
+final_stats[[n]] <- matrix(rep(0,9),nrow=9,ncol=1)
+rownames(final_stats[[n]]) <- rownames(stats[[s]]$`0.05`)
+rownames(final_stats[[n]]) <- paste0(rownames(final_stats[[n]])," : ",hyper[[noise]][,2]," alpha=",hyper[[noise]][,3])
+for(r in result){ # looping on synthetic signals
+  row = 1
+  p <- r$samples
+  trends <- build_trends_window(p, 10, 0.01)
+  error <- error_synthetic(r, trends)
+  old <- final_stats[[n]][row]
+  final_stats[[n]][row] <- error + old
+  row <- row+1
+  
+  trends <- build_trends_bottom_up(p, 10, 0.01)
+  error <- error_synthetic(r, trends)
+  old <- final_stats[[n]][row]
+  final_stats[[n]][row] <- error + old
+  row <- row+1
+  
+  trends <- build_trends_bottom_up_opt(p, 50, 0.01)
+  error <- error_synthetic(r, trends)
+  old <- final_stats[[n]][row]
+  final_stats[[n]][row] = error + old
+  row <- row+1
+  
+  trends <- build_trends_bottom_up_opt_max(p, 20, 20, 0.05)
+  error <- error_synthetic(r, trends)
+  old <- final_stats[[n]][row]
+  final_stats[[n]][row] <- error + old
+  row <- row+1
+  
+  trends <- build_trends_window_max(p, 20, 20, 0.01)
+  error <- error_synthetic(r, trends)
+  old <- final_stats[[n]][row]
+  final_stats[[n]][row] = error + old
+  row <- row+1
+  
+  trends <- build_trends_window_max_merge(p, 20, 20, 0.01)
+  error <- error_synthetic(r, trends)
+  old <- final_stats[[n]][row]
+  final_stats[[n]][row] <- error + old
+  row <- row+1
+  
+  trends <- build_trends_bottom_up_opt_max(p, 20, 20, 0.05)
+  trends <- merge_trends(p, trends, 0.05)
+  error <- error_synthetic(r, trends)
+  old <- final_stats[[n]][row]
+  final_stats[[n]][row] <- error + old
+  row <- row+1
+  
+  trends <- build_trends_SWAB(p, 10, 20, 0.02)
+  error <- error_synthetic(r, trends)
+  old <- final_stats[[n]][row]
+  final_stats[[n]][row] <- error + old
+  row <- row+1
+  
+  trends <- build_trends_SWAB_merge(p, 10, 20, 0.02)
+  error <- error_synthetic(r, trends)
+  old <- final_stats[[n]][row]
+  final_stats[[n]][row] <- error + old
+  row <- row+1
+}
+
+
+# noise = 5%
+noise = 0.05
+n <- as.character(noise)
+result <- synthetic(20, 2000, noise, 10)
+final_stats[[n]] <- matrix(rep(0,9),nrow=9,ncol=1)
+row = 1
+rownames(final_stats[[n]]) <- rownames(stats[[s]]$`0.05`)
+rownames(final_stats[[n]]) <- paste0(rownames(final_stats[[n]])," : ",hyper[[noise]][,2]," alpha=",hyper[[noise]][,3])
+for(r in result){ # looping on synthetic signals
+  row = 1
+  p <- r$samples
+  trends <- build_trends_window(p, 20, 0.01)
+  error <- error_synthetic(r, trends)
+  old <- final_stats[[n]][row]
+  final_stats[[n]][row] <- error + old
+  row <- row+1
+  
+  trends <- build_trends_bottom_up(p, 20, 0.01)
+  error <- error_synthetic(r, trends)
+  old <- final_stats[[n]][row]
+  final_stats[[n]][row] <- error + old
+  row <- row+1
+  
+  trends <- build_trends_bottom_up_opt(p, 20, 0.01)
+  error <- error_synthetic(r, trends)
+  old <- final_stats[[n]][row]
+  final_stats[[n]][row] <- error + old
+  row <- row+1
+  
+  trends <- build_trends_bottom_up_opt_max(p, 50, 100, 0.01)
+  error <- error_synthetic(r, trends)
+  old <- final_stats[[n]][row]
+  final_stats[[n]][row] <- error + old
+  row <- row+1
+  
+  trends <- build_trends_window_max(p, 50, 50, 0.01)
+  error <- error_synthetic(r, trends)
+  old <- final_stats[[n]][row]
+  final_stats[[n]][row] <- error + old
+  row <- row+1
+  
+  trends <- build_trends_window_max_merge(p, 50, 50, 0.01)
+  error <- error_synthetic(r, trends)
+  old <- final_stats[[n]][row]
+  final_stats[[n]][row] <- error + old
+  row <- row+1
+  
+  trends <- build_trends_bottom_up_opt_max(p, 50, 50, 0.05)
+  trends <- merge_trends(p, trends, 0.05)
+  error <- error_synthetic(r, trends)
+  old <- final_stats[[n]][row]
+  final_stats[[n]][row] <- error + old
+  row <- row+1
+  
+  trends <- build_trends_SWAB(p, 20, 40, 0.02)
+  error <- error_synthetic(r, trends)
+  old <- final_stats[[n]][row]
+  final_stats[[n]][row] <- error + old
+  row <- row+1
+  
+  trends <- build_trends_SWAB_merge(p, 20, 40, 0.02)
+  error <- error_synthetic(r, trends)
+  old <- final_stats[[n]][row]
+  final_stats[[n]][row] <- error + old
+  row <- row+1
+}
+
+# noise = 10%
+noise = 0.1
+n <- as.character(noise)
+result <- synthetic(20, 2000, noise, 10)
+final_stats[[n]] <- matrix(rep(0,9),nrow=9,ncol=1)
+row = 1
+rownames(final_stats[[n]]) <- rownames(stats[[s]]$`0.05`)
+rownames(final_stats[[n]]) <- paste0(rownames(final_stats[[n]])," : ",hyper[[noise]][,2]," alpha=",hyper[[noise]][,3])
+for(r in result){ # looping on synthetic signals
+  row = 1
+  p <- r$samples
+  trends <- build_trends_window(p, 50, 0.01)
+  error <- error_synthetic(r, trends)
+  old <- final_stats[[n]][row]
+  final_stats[[n]][row] <- error + old
+  row <- row+1
+  
+  trends <- build_trends_bottom_up(p, 50, 0.02)
+  error <- error_synthetic(r, trends)
+  old <- final_stats[[n]][row]
+  final_stats[[n]][row] <- error + old
+  row <- row+1
+  
+  trends <- build_trends_bottom_up_opt(p, 20, 0.01)
+  error <- error_synthetic(r, trends)
+  old <- final_stats[[n]][row]
+  final_stats[[n]][row] <- error + old
+  row <- row+1
+  
+  trends <- build_trends_bottom_up_opt_max(p, 100, 100, 0.05)
+  error <- error_synthetic(r, trends)
+  old <- final_stats[[n]][row]
+  final_stats[[n]][row] <- error + old
+  row <- row+1
+  
+  trends <- build_trends_window_max(p, 50, 50, 0.01)
+  error <- error_synthetic(r, trends)
+  old <- final_stats[[n]][row]
+  final_stats[[n]][row] <- error + old
+  row <- row+1
+  
+  trends <- build_trends_window_max_merge(p, 50, 50, 0.01)
+  error <- error_synthetic(r, trends)
+  old <- final_stats[[n]][row]
+  final_stats[[n]][row] <- error + old
+  row <- row+1
+  
+  trends <- build_trends_bottom_up_opt_max(p, 100, 100, 0.05)
+  trends <- merge_trends(p, trends, 0.05)
+  error <- error_synthetic(r, trends)
+  old <- final_stats[[n]][row]
+  final_stats[[n]][row] <- error + old
+  row <- row+1
+  
+  trends <- build_trends_SWAB(p, 50, 100, 0.01)
+  error <- error_synthetic(r, trends)
+  old <- final_stats[[n]][row]
+  final_stats[[n]][row] <- error + old
+  row <- row+1
+  
+  trends <- build_trends_SWAB_merge(p, 50, 100, 0.01)
+  error <- error_synthetic(r, trends)
+  old <- final_stats[[n]][row]
+  final_stats[[n]][row] <- error + old
+  row <- row+1
+}
+
+important <- final_stats
+
+for(n in c(0.1,0.05,0.01)){
+  noise <- as.character(n)
+  # final_stats[[noise]] <- matrix(final_stats[[noise]][1:9])
+  # final_stats[[noise]] <- cbind(final_stats[[noise]],paste0(hyper[[noise]][,2],"-",hyper[[noise]][,3]))
+  # rownames(final_stats[[noise]]) <- rownames(stats[[s]]$`0.05`)
+  write.table(final_stats[[noise]], file=paste0("Ranking_noise:",noise,".csv"), row.names = TRUE, sep=";", dec=",")
+}
+
+
+## testing top 3 methods
+result <- synthetic(1, 2000, 0.5, 10)
+r <- result[[1]]
+plot_synthetic(r)
+trends <- build_trends_window_max_merge(r$samples, 100, 100, 0.01)
+plot_trends(r$samples, trends, "win-max-merge", 0.01)
+
+trends <- build_trends_bottom_up_opt_max(r$samples, 100, 100, 0.01)
+trends <- merge_trends(r$samples, trends, 0.01)
+plot_trends(r$samples, trends, "bottom-up-opt-max-merge", 0.01)
+
+trends <- build_trends_SWAB_merge(r$samples, 50, 100, 0.01)
+plot_trends(r$samples, trends, "SWAB-merge", 0.01)
+
+result <- synthetic(1, 2000, 0.05, 10)
+r <- result[[1]]
+plot_synthetic(r)
+trends <- build_trends_window_max_merge(r$samples, 50, 50, 0.01)
+plot_trends(r$samples, trends, "win-max-merge", 0.01)
+
+trends <- build_trends_bottom_up_opt_max(r$samples, 50, 50, 0.01)
+trends <- merge_trends(r$samples, trends, 0.01)
+plot_trends(r$samples, trends, "bottom-up-opt-max-merge", 0.01)
+
+trends <- build_trends_SWAB_merge(r$samples, 20, 40, 0.02)
+plot_trends(r$samples, trends, "SWAB-merge", 0.02)
+
+
+result <- synthetic(1,2000,0.01, 10)
+r <- result[[1]]
+plot_synthetic(r)
+trends <- build_trends_window_max_merge(r$samples, 20, 20, 0.01)
+plot_trends(r$samples, trends, "win-max-merge", 0.01)
+
+trends <- build_trends_bottom_up_opt_max(r$samples, 20, 20, 0.05)
+trends <- merge_trends(r$samples, trends, 0.05)
+plot_trends(r$samples, trends, "bottom-up-opt-max-merge", 0.05)
+
+trends <- build_trends_SWAB_merge(r$samples, 10, 20, 0.02)
+plot_trends(r$samples, trends, "SWAB-merge", 0.02)
+
 pdf("random.pdf")
 for(i in 1:20){
   y <- cumsum(sample(c(-1, 1), 500, TRUE))
